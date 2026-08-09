@@ -244,7 +244,7 @@ async def test_current_dispatcharr_channel_enriches_title_and_image(
     entry = AsyncMock()
     entry.state = ConfigEntryState.LOADED
     entry.entry_id = "entry-one"
-    leaf = SimpleNamespace(
+    channel_leaf = SimpleNamespace(
         domain="dispatcharr",
         identifier=f"entry/entry-one/channel/{channel_id}",
         can_play=True,
@@ -252,22 +252,31 @@ async def test_current_dispatcharr_channel_enriches_title_and_image(
         title="SVT 1",
         thumbnail="/api/dispatcharr/entry-one/artwork/17",
     )
+    programme_leaf = SimpleNamespace(
+        domain="dispatcharr",
+        identifier=f"entry/entry-one/programme/{channel_id}",
+        can_play=False,
+        can_expand=False,
+        title="Synthetic bulletin",
+        thumbnail=None,
+    )
 
     with (
         patch.object(hass.config_entries, "async_entries", return_value=[entry]),
         patch(
             "custom_components.aeriotv.media_player.media_source.async_browse_media",
-            AsyncMock(return_value=leaf),
+            AsyncMock(side_effect=[channel_leaf, programme_leaf]),
         ) as browse,
     ):
         await entity._async_refresh_media_metadata()
 
-    assert entity.media_title == "SVT 1"
+    assert entity.media_channel == "SVT 1"
+    assert entity.media_title == "Synthetic bulletin"
     assert entity.media_image_url == "/api/dispatcharr/entry-one/artwork/17"
-    browse.assert_awaited_once_with(
-        hass,
-        f"media-source://dispatcharr/entry/entry-one/channel/{channel_id}",
-    )
+    assert browse.await_args_list == [
+        ((hass, f"media-source://dispatcharr/entry/entry-one/channel/{channel_id}"),),
+        ((hass, f"media-source://dispatcharr/entry/entry-one/programme/{channel_id}"),),
+    ]
 
 
 async def test_channel_change_clears_stale_metadata(hass: HomeAssistant) -> None:
@@ -315,7 +324,11 @@ async def test_stale_metadata_lookup_cannot_overwrite_new_channel(
             can_play=True,
             can_expand=False,
             title="Old" if channel_id == old_id else "New",
-            thumbnail="/old.png" if channel_id == old_id else "/new.png",
+            thumbnail=(
+                "/api/dispatcharr/entry-one/artwork/17"
+                if channel_id == old_id
+                else "/api/dispatcharr/entry-one/artwork/18"
+            ),
         )
 
     with (
@@ -333,7 +346,22 @@ async def test_stale_metadata_lookup_cannot_overwrite_new_channel(
         await old_task
 
     assert entity.media_title == "New"
-    assert entity.media_image_url == "/new.png"
+    assert entity.media_image_url == "/api/dispatcharr/entry-one/artwork/18"
+
+
+@pytest.mark.parametrize(
+    "thumbnail",
+    [
+        "https://example.invalid/logo.png",
+        "/api/dispatcharr/other-entry/artwork/17",
+        "/api/dispatcharr/entry-one/artwork/not-an-id",
+        "/api/dispatcharr/entry-one/artwork/17?token=secret",
+        "/api/dispatcharr/entry-one/artwork/%31%37",
+    ],
+)
+def test_artwork_path_validation_rejects_untrusted_urls(thumbnail: str) -> None:
+    """Only the exact same-entry protected artwork route may be signed."""
+    assert AerioTVMediaPlayer._validated_artwork_path("entry-one", thumbnail) is None
 
 
 async def test_missing_dispatcharr_channel_leaves_metadata_empty(
@@ -440,6 +468,46 @@ async def test_invalid_leaf_and_unexpected_failure_are_harmless(
 
     assert entity.media_title is None
     assert entity.media_image_url is None
+
+
+async def test_media_image_fetch_uses_fresh_signed_path(hass: HomeAssistant) -> None:
+    """The media-player proxy can fetch protected Dispatcharr artwork."""
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True)
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity._media_image_url = "/api/dispatcharr/entry-one/artwork/17"
+    entity._async_fetch_image_from_cache = AsyncMock(return_value=(b"image", "image/png"))
+
+    with patch(
+        "custom_components.aeriotv.media_player.async_sign_path",
+        return_value="/api/dispatcharr/entry-one/artwork/17?authSig=signed",
+    ) as sign:
+        result = await entity.async_get_media_image()
+
+    assert result == (b"image", "image/png")
+    sign.assert_called_once()
+    assert sign.call_args.args[:2] == (hass, "/api/dispatcharr/entry-one/artwork/17")
+    assert sign.call_args.kwargs == {"use_content_user": True}
+    assert sign.call_args.args[2].total_seconds() == 60
+    entity._async_fetch_image_from_cache.assert_awaited_once_with(
+        "/api/dispatcharr/entry-one/artwork/17?authSig=signed"
+    )
+
+
+async def test_config_entry_callback_marshals_to_event_loop(hass: HomeAssistant) -> None:
+    """Worker-thread provider notifications never call async HA APIs directly."""
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True)
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entry = AsyncMock()
+    entry.domain = "dispatcharr"
+
+    with patch.object(hass, "add_job") as add_job:
+        entity._config_entry_updated(Mock(), entry)
+
+    add_job.assert_called_once_with(entity._async_config_entry_updated)
 
 
 async def test_unload_awaits_blocked_metadata_task(hass: HomeAssistant) -> None:

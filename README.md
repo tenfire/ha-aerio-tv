@@ -27,7 +27,7 @@ Install and configure the separate [Dispatcharr Home Assistant integration](http
 - Dispatcharr owns catalogue retrieval, grouping, search, artwork, and refresh.
 - AerioTV owns pairing, device availability, transport controls, and playback.
 - The integrations communicate through documented stable media identifiers rather than importing each other's Python internals.
-- With Dispatcharr integration `0.1.5` or newer, AerioTV also shows the current channel name and logo on its media-player entity.
+- With Dispatcharr integration `0.1.5` or newer, AerioTV shows the current channel name and logo on its media-player entity. Dispatcharr `0.1.6` or newer also supplies the current programme title. Protected artwork is fetched through Home Assistant's signed media-image proxy rather than made public.
 
 This keeps both integrations independently installable and avoids two competing channel caches.
 

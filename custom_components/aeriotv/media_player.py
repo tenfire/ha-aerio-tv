@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import unquote, urlsplit
 from uuid import UUID
 
 from homeassistant.components import media_source
+from homeassistant.components.http.auth import async_sign_path
 from homeassistant.components.media_player import (
     MediaPlayerEntity,
     MediaPlayerEntityFeature,
@@ -17,7 +18,7 @@ from homeassistant.components.media_player import (
 )
 from homeassistant.components.media_player.const import MediaType
 from homeassistant.config_entries import SIGNAL_CONFIG_ENTRY_CHANGED, ConfigEntry, ConfigEntryChange, ConfigEntryState
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -60,6 +61,7 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
         self._remove_config_entry_callback = None
         self._metadata_task: asyncio.Task[None] | None = None
         self._metadata_channel_id: str | None = self._client.state.channel_id
+        self._media_channel: str | None = None
         self._media_title: str | None = None
         self._media_image_url: str | None = None
 
@@ -88,10 +90,15 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
         await super().async_will_remove_from_hass()
 
     def _config_entry_updated(self, change_type: ConfigEntryChange, entry: ConfigEntry) -> None:
-        """Publish optional feature changes when Dispatcharr changes state."""
+        """Marshal provider lifecycle notifications onto Home Assistant's event loop."""
         if entry.domain == DISPATCHARR_DOMAIN:
-            self._schedule_metadata_refresh(force=True)
-            self.async_write_ha_state()
+            self.hass.add_job(self._async_config_entry_updated)
+
+    @callback
+    def _async_config_entry_updated(self) -> None:
+        """Refresh optional metadata safely from the event loop."""
+        self._schedule_metadata_refresh(force=True)
+        self.async_write_ha_state()
 
     def _state_updated(self, state: AerioTVState) -> None:
         self._schedule_metadata_refresh()
@@ -103,6 +110,7 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
         if not force and channel_id == self._metadata_channel_id:
             return
         self._metadata_channel_id = channel_id
+        self._media_channel = None
         self._media_title = None
         self._media_image_url = None
         if self._metadata_task:
@@ -120,43 +128,77 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
         if native_id is None or not native_id.startswith("disp:"):
             return
         channel_id = native_id.removeprefix("disp:")
-        matches: list[tuple[str, str | None]] = []
+        matches: list[tuple[str, str | None, str | None]] = []
         for entry_id in self._loaded_dispatcharr_entry_ids:
-            identifier = f"entry/{entry_id}/channel/{channel_id}"
-            media_id = media_source.generate_media_source_id(DISPATCHARR_DOMAIN, identifier)
-            try:
-                leaf = await media_source.async_browse_media(self.hass, media_id)
-            except (HomeAssistantError, ValueError):
-                continue
-            except Exception:
-                _LOGGER.debug("Unexpected Dispatcharr metadata lookup failure", exc_info=True)
-                continue
+            channel = await self._async_browse_metadata_leaf(entry_id, "channel", channel_id, can_play=True)
             if self._client.state.channel_id != native_id:
                 return
-            if (
-                leaf.domain != DISPATCHARR_DOMAIN
-                or leaf.identifier != identifier
-                or leaf.can_play is not True
-                or leaf.can_expand is not False
-                or not isinstance(leaf.title, str)
-            ):
-                _LOGGER.debug("Ignoring an invalid Dispatcharr metadata leaf")
+            if channel is None:
                 continue
+            programme = await self._async_browse_metadata_leaf(entry_id, "programme", channel_id, can_play=False)
+            if self._client.state.channel_id != native_id:
+                return
             matches.append(
                 (
-                    leaf.title,
-                    leaf.thumbnail if isinstance(leaf.thumbnail, str) else None,
+                    channel.title,
+                    programme.title if programme is not None else None,
+                    self._validated_artwork_path(entry_id, channel.thumbnail),
                 )
             )
         if self._client.state.channel_id != native_id:
             return
         if len(matches) == 1:
-            self._media_title, self._media_image_url = matches[0]
+            channel, programme, image = matches[0]
+            self._media_channel = channel
+            self._media_title = programme or channel
+            self._media_image_url = image
             self.async_write_ha_state()
         elif len(matches) > 1:
             _LOGGER.debug("Dispatcharr channel metadata is ambiguous across entries")
         else:
             _LOGGER.debug("No Dispatcharr metadata found for the current AerioTV channel")
+
+    async def _async_browse_metadata_leaf(self, entry_id: str, kind: str, channel_id: str, *, can_play: bool):
+        """Fetch and validate one public Dispatcharr metadata leaf."""
+        identifier = f"entry/{entry_id}/{kind}/{channel_id}"
+        media_id = media_source.generate_media_source_id(DISPATCHARR_DOMAIN, identifier)
+        try:
+            leaf = await media_source.async_browse_media(self.hass, media_id)
+        except (HomeAssistantError, ValueError):
+            return None
+        except Exception:
+            _LOGGER.debug("Unexpected Dispatcharr metadata lookup failure", exc_info=True)
+            return None
+        if (
+            leaf.domain != DISPATCHARR_DOMAIN
+            or leaf.identifier != identifier
+            or leaf.can_play is not can_play
+            or leaf.can_expand is not False
+            or not isinstance(leaf.title, str)
+        ):
+            _LOGGER.debug("Ignoring an invalid Dispatcharr metadata leaf")
+            return None
+        return leaf
+
+    @staticmethod
+    def _validated_artwork_path(entry_id: str, thumbnail: Any) -> str | None:
+        """Accept only the authenticated same-origin Dispatcharr artwork route."""
+        if not isinstance(thumbnail, str):
+            return None
+        parsed = urlsplit(thumbnail)
+        expected_prefix = f"/api/dispatcharr/{entry_id}/artwork/"
+        if (
+            parsed.scheme
+            or parsed.netloc
+            or parsed.query
+            or parsed.fragment
+            or unquote(parsed.path) != parsed.path
+            or not parsed.path.startswith(expected_prefix)
+            or not parsed.path.removeprefix(expected_prefix).isdigit()
+        ):
+            _LOGGER.debug("Ignoring an invalid Dispatcharr artwork path")
+            return None
+        return parsed.path
 
     @property
     def available(self) -> bool:
@@ -198,12 +240,28 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
         return MediaType.CHANNEL
 
     @property
+    def media_channel(self) -> str | None:
+        return self._media_channel
+
+    @property
     def media_title(self) -> str | None:
         return self._media_title
 
     @property
     def media_image_url(self) -> str | None:
         return self._media_image_url
+
+    async def async_get_media_image(self) -> tuple[bytes | None, str | None]:
+        """Fetch authenticated Dispatcharr artwork through a fresh signed path."""
+        if self._media_image_url is None:
+            return None, None
+        signed_path = async_sign_path(
+            self.hass,
+            self._media_image_url,
+            timedelta(minutes=1),
+            use_content_user=True,
+        )
+        return await self._async_fetch_image_from_cache(signed_path)
 
     @property
     def media_position(self) -> float | None:
