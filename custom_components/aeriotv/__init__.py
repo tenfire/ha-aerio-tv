@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .client import AerioTVAuthError, AerioTVClient, AerioTVConnectionError
+from .client import AerioTVAuthError, AerioTVClient
 from .const import CONF_PORT, CONF_TOKEN, PLATFORMS
 
 type AerioTVConfigEntry = ConfigEntry[AerioTVClient]
@@ -28,8 +28,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: AerioTVConfigEntry) -> b
         await client.start()
     except AerioTVAuthError as err:
         raise ConfigEntryAuthFailed from err
-    except AerioTVConnectionError as err:
-        raise ConfigEntryNotReady from err
     entry.runtime_data = client
     try:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

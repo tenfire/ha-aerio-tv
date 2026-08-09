@@ -159,6 +159,82 @@ async def test_runtime_client_reconnects_after_server_closes(unused_tcp_port, so
 
 
 @pytest.mark.asyncio
+async def test_reconnect_survives_immediate_post_auth_close(unused_tcp_port, socket_enabled, monkeypatch):
+    """A reconnect that closes during authentication cannot lose supervision."""
+    connections = 0
+    authenticated_third_time = asyncio.Event()
+    connected_third_time = asyncio.Event()
+    first_socket = None
+
+    async def remote(request):
+        nonlocal connections, first_socket
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        connections += 1
+        if connections == 1:
+            first_socket = ws
+        await ws.send_json({"t": "hello", "v": 1, "device": "Living room"})
+        async for msg in ws:
+            if json.loads(msg.data).get("t") != "auth":
+                continue
+            await ws.send_json({"t": "authOk", "token": "saved"})
+            if connections == 2:
+                await ws.close()
+            elif connections == 3:
+                authenticated_third_time.set()
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/remote", remote)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", unused_tcp_port).start()
+    monkeypatch.setattr(client_module, "RECONNECT_DELAYS", (0.01,))
+    session = ClientSession()
+    client = AerioTVClient(session, "127.0.0.1", unused_tcp_port, "saved")
+
+    def state_changed(state):
+        if authenticated_third_time.is_set() and state.connected:
+            connected_third_time.set()
+
+    client.add_callback(state_changed)
+    try:
+        await client.start()
+        assert first_socket is not None
+        await first_socket.close()
+        async with asyncio.timeout(1):
+            await connected_third_time.wait()
+        assert connections == 3
+        assert client.state.connected
+    finally:
+        await client.disconnect()
+        await session.close()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_loads_offline_and_reconnects(monkeypatch):
+    """Initial connection refusal leaves a supervised unavailable client."""
+    session = AsyncMock()
+    session.ws_connect.side_effect = OSError("app closed")
+    client = AerioTVClient(session, "192.0.2.10", 43123, "saved")
+    reconnect_started = asyncio.Event()
+
+    async def reconnect():
+        reconnect_started.set()
+
+    monkeypatch.setattr(client, "_reconnect", reconnect)
+
+    await client.start()
+    await reconnect_started.wait()
+
+    assert not client.state.connected
+    assert client._managed
+    assert client._reconnect_task is not None
+    await client.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_runtime_auth_rejection_invokes_callback(unused_tcp_port, socket_enabled, monkeypatch):
     """A token revoked after setup requests reauthentication on reconnect."""
     connections = 0
@@ -235,7 +311,7 @@ async def test_auth_send_failure_is_normalized_and_cleaned_up() -> None:
     client = AerioTVClient(session, "example.invalid", 1, "saved")
 
     with pytest.raises(AerioTVConnectionError, match="connection lost"):
-        await client.start()
+        await client.connect()
 
     await asyncio.sleep(0)
     assert websocket.closed
@@ -243,4 +319,4 @@ async def test_auth_send_failure_is_normalized_and_cleaned_up() -> None:
     assert client._listener is None
     assert client._reconnect_task is None
     assert not client._managed
-    assert client._stopping
+    assert not client._stopping

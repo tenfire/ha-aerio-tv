@@ -67,7 +67,7 @@ If discovery is unavailable, enter the TV's host and the ephemeral port advertis
 
 ## Media-player behavior
 
-The entity reports unavailable whenever the foreground-only companion server cannot be reached. While connected, it receives state pushes from AerioTV instead of polling rapidly.
+The entity reports unavailable whenever the foreground-only companion server cannot be reached. If Home Assistant starts while AerioTV is closed, the config entry and unavailable entity still load immediately while reconnection continues in the background. While connected, it receives state pushes from AerioTV instead of polling rapidly.
 
 Supported controls currently include:
 

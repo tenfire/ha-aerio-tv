@@ -8,10 +8,10 @@ import pytest
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from custom_components.aeriotv import async_setup_entry, async_unload_entry
-from custom_components.aeriotv.client import AerioTVAuthError, AerioTVConnectionError
+from custom_components.aeriotv.client import AerioTVAuthError
 from custom_components.aeriotv.const import CONF_DEVICE_ID, CONF_PORT, CONF_TOKEN, DOMAIN, PLATFORMS
 
 
@@ -63,23 +63,35 @@ async def test_setup_and_unload_supervised_client(hass: HomeAssistant) -> None:
         client.disconnect.assert_awaited_once()
 
 
-@pytest.mark.parametrize(
-    ("error", "expected"),
-    [
-        (AerioTVAuthError("revoked"), ConfigEntryAuthFailed),
-        (AerioTVConnectionError("offline"), ConfigEntryNotReady),
-    ],
-)
-async def test_setup_classifies_connection_failures(
-    hass: HomeAssistant, error: Exception, expected: type[Exception]
-) -> None:
-    """Revoked credentials reauthenticate and offline devices retry later."""
+async def test_setup_rejects_invalid_authentication(hass: HomeAssistant) -> None:
+    """Revoked credentials start Home Assistant's repair flow."""
     entry = make_entry()
     client = AsyncMock()
-    client.start.side_effect = error
+    client.start.side_effect = AerioTVAuthError("revoked")
     with patch("custom_components.aeriotv.AerioTVClient", return_value=client):
-        with pytest.raises(expected):
+        with pytest.raises(ConfigEntryAuthFailed):
             await async_setup_entry(hass, entry)
+
+
+async def test_setup_loads_entity_while_device_is_offline(hass: HomeAssistant) -> None:
+    """A closed TV app is represented by an unavailable loaded entity."""
+    entry = make_entry()
+    client = AsyncMock()
+    client.state.connected = False
+    client._reconnect_task = AsyncMock()
+    with (
+        patch("custom_components.aeriotv.AerioTVClient", return_value=client),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            new=AsyncMock(),
+        ) as forward,
+    ):
+        assert await async_setup_entry(hass, entry)
+
+    client.start.assert_awaited_once()
+    forward.assert_awaited_once_with(entry, PLATFORMS)
+    assert entry.runtime_data is client
 
 
 async def test_platform_forward_failure_disconnects_client(hass: HomeAssistant) -> None:
