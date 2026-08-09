@@ -84,6 +84,22 @@ async def test_pair_and_commands(server, aiohttp_client, socket_enabled):
     await client.disconnect()
 
 
+def test_position_timestamp_changes_only_with_valid_position() -> None:
+    """State-only and invalid position frames do not refresh stale position time."""
+    session = AsyncMock()
+    client = AerioTVClient(session, "127.0.0.1", 1234, "saved")
+
+    client._handle({"cmd": "position", "positionWallMs": 5000})
+    measured_at = client.state.position_updated_at
+    assert measured_at is not None
+
+    client._handle({"cmd": "state", "isPlaying": False, "canSeek": True})
+    assert client.state.position_updated_at is measured_at
+
+    client._handle({"cmd": "position", "positionWallMs": float("nan")})
+    assert client.state.position_updated_at is measured_at
+
+
 @pytest.mark.asyncio
 async def test_runtime_client_reconnects_after_server_closes(unused_tcp_port, socket_enabled, monkeypatch):
     """The managed runtime client reconnects after AerioTV returns."""

@@ -14,13 +14,15 @@ AerioTV remains the playback authority. Home Assistant connects directly to each
 - Durable per-TV authentication token across Home Assistant restarts
 - Local push state for availability, play/pause, current channel ID, live status, and live rewind position
 - Play, pause, play/pause, and seek controls
+- Optional Dispatcharr channel browser with groups, logos, and current-programme labels
+- Channel selection from Home Assistant's media picker using stable Dispatcharr channel UUIDs
 - Privacy-preserving diagnostics with credentials, endpoint, device identity, and channel identity redacted
 
-## Planned channel browsing
+## Optional Dispatcharr channel browsing
 
 AerioTV's companion protocol does not expose its channel catalogue, groups, or logos. The integration therefore does not duplicate IPTV credentials or scrape application storage.
 
-Grouped folders and periodically refreshed channel lists will be supplied by the separate Dispatcharr Home Assistant integration when its media-source playback contract is ready. The intended boundary is:
+Install and configure the separate [Dispatcharr Home Assistant integration](https://github.com/tenfire/ha-dispatcharr) to add its catalogue to the AerioTV media picker. The boundary is intentionally soft:
 
 - Dispatcharr owns catalogue retrieval, grouping, search, artwork, and refresh.
 - AerioTV owns pairing, device availability, transport controls, and playback.
@@ -35,7 +37,8 @@ This keeps both integrations independently installable and avoids two competing 
 - The companion server uses an ephemeral port, so automatic discovery is strongly recommended.
 - Manual setup requires both the TV address and the currently advertised port.
 - Communication uses AerioTV's existing unencrypted `ws://` protocol. Authentication does not encrypt traffic: a device able to capture LAN traffic can replay the bearer token and control the TV. Isolate untrusted clients, keep the TV and Home Assistant on a trusted network, and never expose the companion port to the internet.
-- Channel browsing/playback selection remains deferred until the Dispatcharr media-source contract is available.
+- Dispatcharr browsing is optional. Without it, pairing and all ordinary AerioTV controls continue to work.
+- A selected Dispatcharr channel must also exist in the catalogue loaded by the AerioTV Android app. Both sides use the same stable Dispatcharr UUID; AerioTV does not receive or play Dispatcharr's stream URL from Home Assistant.
 
 ## Installation with HACS
 
@@ -71,8 +74,9 @@ Supported controls currently include:
 - pause
 - play/pause
 - seek when AerioTV reports a seekable playback window
+- browse and select Dispatcharr channels when that integration is loaded
 
-Channel selection through Home Assistant Browse Media will be documented once the Dispatcharr integration can provide grouped playable items.
+Open the media browser for the AerioTV entity and select **Dispatcharr**. Dispatcharr owns the displayed folders, channel names, logos, and current-programme labels. AerioTV receives only the selected stable channel UUID and switches through its native `disp:<uuid>` command.
 
 ## Troubleshooting
 

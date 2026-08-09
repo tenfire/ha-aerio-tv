@@ -9,6 +9,7 @@ import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from aiohttp import ClientConnectionError, ClientSession, ClientWebSocketResponse, WSMsgType
@@ -39,6 +40,7 @@ class AerioTVState:
     position_ms: int = 0
     window_start_ms: int = 0
     window_end_ms: int = 0
+    position_updated_at: datetime | None = None
 
 
 StateCallback = Callable[[AerioTVState], None]
@@ -275,6 +277,8 @@ class AerioTVClient:
                     and value >= 0
                 ):
                     setattr(self.state, attribute, int(value))
+                    if field == "positionWallMs":
+                        self.state.position_updated_at = datetime.now(UTC)
             self._notify()
 
     def _notify(self) -> None:
