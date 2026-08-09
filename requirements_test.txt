@@ -1,0 +1,6 @@
+aiohttp>=3.11
+homeassistant>=2026.2,<2026.3
+pytest>=8.3
+pytest-homeassistant-custom-component
+pytest-asyncio>=0.25
+ruff>=0.9
