@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from homeassistant import config_entries
@@ -227,3 +229,240 @@ async def test_play_media_requires_referenced_loaded_entry(hass: HomeAssistant) 
             )
 
     client.set_channel.assert_not_awaited()
+
+
+async def test_current_dispatcharr_channel_enriches_title_and_image(
+    hass: HomeAssistant,
+) -> None:
+    """The current native UUID is enriched through Dispatcharr's public leaf."""
+    channel_id = "ceaf43af-32ad-432f-9a41-465ced16e655"
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True, channel_id=f"disp:{channel_id}")
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity.async_write_ha_state = Mock()
+    entry = AsyncMock()
+    entry.state = ConfigEntryState.LOADED
+    entry.entry_id = "entry-one"
+    leaf = SimpleNamespace(
+        domain="dispatcharr",
+        identifier=f"entry/entry-one/channel/{channel_id}",
+        can_play=True,
+        can_expand=False,
+        title="SVT 1",
+        thumbnail="/api/dispatcharr/entry-one/artwork/17",
+    )
+
+    with (
+        patch.object(hass.config_entries, "async_entries", return_value=[entry]),
+        patch(
+            "custom_components.aeriotv.media_player.media_source.async_browse_media",
+            AsyncMock(return_value=leaf),
+        ) as browse,
+    ):
+        await entity._async_refresh_media_metadata()
+
+    assert entity.media_title == "SVT 1"
+    assert entity.media_image_url == "/api/dispatcharr/entry-one/artwork/17"
+    browse.assert_awaited_once_with(
+        hass,
+        f"media-source://dispatcharr/entry/entry-one/channel/{channel_id}",
+    )
+
+
+async def test_channel_change_clears_stale_metadata(hass: HomeAssistant) -> None:
+    """A channel transition never leaves the prior channel's title or image."""
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True, channel_id="disp:old")
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity.async_write_ha_state = Mock()
+    entity._media_title = "Old channel"
+    entity._media_image_url = "/old.png"
+
+    client.state.channel_id = None
+    entity._state_updated(client.state)
+
+    assert entity.media_title is None
+    assert entity.media_image_url is None
+
+
+async def test_stale_metadata_lookup_cannot_overwrite_new_channel(
+    hass: HomeAssistant,
+) -> None:
+    """A slow old-channel lookup is discarded after a newer state arrives."""
+    old_id = "ceaf43af-32ad-432f-9a41-465ced16e655"
+    new_id = "7e343078-9dc6-43d8-bbad-ecb75d2d9c71"
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True, channel_id=f"disp:{old_id}")
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity.async_write_ha_state = Mock()
+    entry = AsyncMock()
+    entry.state = ConfigEntryState.LOADED
+    entry.entry_id = "entry-one"
+    old_started = asyncio.Event()
+    release_old = asyncio.Event()
+
+    async def browse(_hass, media_id):
+        channel_id = media_id.rsplit("/", 1)[-1]
+        if channel_id == old_id:
+            old_started.set()
+            await release_old.wait()
+        return SimpleNamespace(
+            domain="dispatcharr",
+            identifier=f"entry/entry-one/channel/{channel_id}",
+            can_play=True,
+            can_expand=False,
+            title="Old" if channel_id == old_id else "New",
+            thumbnail="/old.png" if channel_id == old_id else "/new.png",
+        )
+
+    with (
+        patch.object(hass.config_entries, "async_entries", return_value=[entry]),
+        patch(
+            "custom_components.aeriotv.media_player.media_source.async_browse_media",
+            side_effect=browse,
+        ),
+    ):
+        old_task = asyncio.create_task(entity._async_refresh_media_metadata())
+        await old_started.wait()
+        client.state.channel_id = f"disp:{new_id}"
+        await entity._async_refresh_media_metadata()
+        release_old.set()
+        await old_task
+
+    assert entity.media_title == "New"
+    assert entity.media_image_url == "/new.png"
+
+
+async def test_missing_dispatcharr_channel_leaves_metadata_empty(
+    hass: HomeAssistant,
+) -> None:
+    """Older providers and unknown UUIDs remain a harmless soft dependency."""
+    channel_id = "ceaf43af-32ad-432f-9a41-465ced16e655"
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True, channel_id=f"disp:{channel_id}")
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity.async_write_ha_state = Mock()
+    entry = AsyncMock()
+    entry.state = ConfigEntryState.LOADED
+    entry.entry_id = "entry-one"
+
+    with (
+        patch.object(hass.config_entries, "async_entries", return_value=[entry]),
+        patch(
+            "custom_components.aeriotv.media_player.media_source.async_browse_media",
+            AsyncMock(side_effect=HomeAssistantError("not found")),
+        ),
+    ):
+        await entity._async_refresh_media_metadata()
+
+    assert entity.media_title is None
+    assert entity.media_image_url is None
+    entity.async_write_ha_state.assert_not_called()
+
+
+async def test_duplicate_dispatcharr_matches_are_ambiguous(hass: HomeAssistant) -> None:
+    """Duplicate UUIDs across providers never select arbitrary metadata."""
+    channel_id = "ceaf43af-32ad-432f-9a41-465ced16e655"
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True, channel_id=f"disp:{channel_id}")
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity.async_write_ha_state = Mock()
+    entries = []
+    for entry_id in ("entry-one", "entry-two"):
+        entry = AsyncMock()
+        entry.state = ConfigEntryState.LOADED
+        entry.entry_id = entry_id
+        entries.append(entry)
+
+    async def browse(_hass, media_id):
+        identifier = media_id.removeprefix("media-source://dispatcharr/")
+        return SimpleNamespace(
+            domain="dispatcharr",
+            identifier=identifier,
+            can_play=True,
+            can_expand=False,
+            title=identifier.split("/")[1],
+            thumbnail="/logo.png",
+        )
+
+    with (
+        patch.object(hass.config_entries, "async_entries", return_value=entries),
+        patch(
+            "custom_components.aeriotv.media_player.media_source.async_browse_media",
+            side_effect=browse,
+        ),
+    ):
+        await entity._async_refresh_media_metadata()
+
+    assert entity.media_title is None
+    assert entity.media_image_url is None
+    entity.async_write_ha_state.assert_not_called()
+
+
+async def test_invalid_leaf_and_unexpected_failure_are_harmless(
+    hass: HomeAssistant,
+) -> None:
+    """Malformed and failed optional-provider responses never leak into state."""
+    channel_id = "ceaf43af-32ad-432f-9a41-465ced16e655"
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True, channel_id=f"disp:{channel_id}")
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity.async_write_ha_state = Mock()
+    entries = []
+    for entry_id in ("bad-leaf", "failure"):
+        entry = AsyncMock()
+        entry.state = ConfigEntryState.LOADED
+        entry.entry_id = entry_id
+        entries.append(entry)
+    invalid = SimpleNamespace(
+        domain="other",
+        identifier="wrong",
+        can_play=False,
+        can_expand=True,
+        title="Wrong",
+        thumbnail="/wrong.png",
+    )
+
+    with (
+        patch.object(hass.config_entries, "async_entries", return_value=entries),
+        patch(
+            "custom_components.aeriotv.media_player.media_source.async_browse_media",
+            AsyncMock(side_effect=[invalid, RuntimeError("provider race")]),
+        ),
+    ):
+        await entity._async_refresh_media_metadata()
+
+    assert entity.media_title is None
+    assert entity.media_image_url is None
+
+
+async def test_unload_awaits_blocked_metadata_task(hass: HomeAssistant) -> None:
+    """Entity removal cancels and collects an in-flight metadata lookup."""
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True, channel_id="disp:channel")
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocked_lookup():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    task = asyncio.create_task(blocked_lookup())
+    entity._metadata_task = task
+    await started.wait()
+    await entity.async_will_remove_from_hass()
+
+    assert task.cancelled()
+    assert cancelled.is_set()
+    assert entity._metadata_task is None
