@@ -10,6 +10,7 @@ from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
+from voluptuous_serialize import convert
 
 from custom_components.aeriotv import config_flow
 from custom_components.aeriotv.const import CONF_DEVICE_ID, CONF_PORT, CONF_TOKEN, DOMAIN
@@ -59,6 +60,7 @@ async def test_zeroconf_uses_stable_id_and_pairs(hass: HomeAssistant, enable_cus
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
         assert result["type"] is FlowResultType.FORM
         assert result["step_id"] == "pair"
+        convert(result["data_schema"])
 
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {"code": "123456"})
 
@@ -71,6 +73,28 @@ async def test_zeroconf_uses_stable_id_and_pairs(hass: HomeAssistant, enable_cus
         CONF_DEVICE_ID: "tv-stable-id",
         CONF_TOKEN: "secret-token",
     }
+
+
+async def test_pair_form_rejects_non_digit_code_locally(hass: HomeAssistant, enable_custom_integrations) -> None:
+    """A malformed six-character code remains on the form without a socket send."""
+    submit_code = AsyncMock()
+    with (
+        patch.object(config_flow.AerioTVClient, "begin_pairing", new=AsyncMock()),
+        patch.object(config_flow.AerioTVClient, "submit_code", new=submit_code),
+        patch.object(config_flow.AerioTVClient, "disconnect", new=AsyncMock()),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": config_entries.SOURCE_ZEROCONF},
+            data=discovery("tv-stable-id", "192.0.2.10", 43123, "Living Room"),
+        )
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {"code": "12AB56"})
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "pair"
+    assert result["errors"] == {"base": "invalid_auth"}
+    submit_code.assert_not_awaited()
 
 
 async def test_rediscovery_updates_ephemeral_endpoint(hass: HomeAssistant, enable_custom_integrations) -> None:

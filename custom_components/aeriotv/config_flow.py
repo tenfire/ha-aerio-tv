@@ -104,41 +104,45 @@ class AerioTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_pair(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         errors: dict[str, str] = {}
-        if user_input:
-            assert self._client is not None
-            try:
-                token = await self._client.submit_code(user_input[CONF_CODE])
-            except AerioTVAuthError:
+        if user_input is not None:
+            code = user_input[CONF_CODE]
+            if len(code) != 6 or not code.isascii() or not code.isdigit():
                 errors["base"] = "invalid_auth"
-            except AerioTVConnectionError:
-                errors["base"] = "cannot_connect"
-                await self._close_client()
             else:
-                name = self._client.state.device_name or self._name
-                await self._close_client()
-                if self._reauth_entry is not None:
-                    if self._reauth_entry.data[CONF_DEVICE_ID] != self._device_id:
-                        return self.async_abort(reason="wrong_device")
-                    return self.async_update_reload_and_abort(
-                        self._reauth_entry,
-                        data_updates={CONF_TOKEN: token},
+                assert self._client is not None
+                try:
+                    token = await self._client.submit_code(code)
+                except AerioTVAuthError:
+                    errors["base"] = "invalid_auth"
+                except AerioTVConnectionError:
+                    errors["base"] = "cannot_connect"
+                    await self._close_client()
+                else:
+                    name = self._client.state.device_name or self._name
+                    await self._close_client()
+                    if self._reauth_entry is not None:
+                        if self._reauth_entry.data[CONF_DEVICE_ID] != self._device_id:
+                            return self.async_abort(reason="wrong_device")
+                        return self.async_update_reload_and_abort(
+                            self._reauth_entry,
+                            data_updates={CONF_TOKEN: token},
+                        )
+                    if not self._device_id:
+                        self._device_id = f"{self._host}:{self._port}"
+                    await self.async_set_unique_id(self._device_id)
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(
+                        title=name,
+                        data={
+                            CONF_HOST: self._host,
+                            CONF_PORT: self._port,
+                            CONF_DEVICE_ID: self._device_id,
+                            CONF_TOKEN: token,
+                        },
                     )
-                if not self._device_id:
-                    self._device_id = f"{self._host}:{self._port}"
-                await self.async_set_unique_id(self._device_id)
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title=name,
-                    data={
-                        CONF_HOST: self._host,
-                        CONF_PORT: self._port,
-                        CONF_DEVICE_ID: self._device_id,
-                        CONF_TOKEN: token,
-                    },
-                )
         return self.async_show_form(
             step_id="pair",
-            data_schema=vol.Schema({vol.Required(CONF_CODE): vol.All(str, vol.Match(r"^\d{6}$"))}),
+            data_schema=vol.Schema({vol.Required(CONF_CODE): vol.All(str, vol.Length(min=6, max=6))}),
             errors=errors,
         )
 
