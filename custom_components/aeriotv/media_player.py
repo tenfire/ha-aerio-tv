@@ -35,6 +35,7 @@ DISPATCHARR_DOMAIN = "dispatcharr"
 DISPATCHARR_MEDIA_ROOT = media_source.generate_media_source_id(DISPATCHARR_DOMAIN, "")
 METADATA_REFRESH_INTERVAL = 60.0
 APP_START_TIMEOUT = 60.0
+APP_READY_DELAY = 5.0
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -453,6 +454,7 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
                                 await self._connected.wait()
                             if self._stopping:
                                 raise HomeAssistantError("AerioTV entity stopped while starting")
+                            await asyncio.sleep(APP_READY_DELAY)
                     except TimeoutError as err:
                         raise HomeAssistantError("AerioTV did not reconnect after the turn-on action") from err
                 await self._client.set_channel(f"disp:{channel_id}")
