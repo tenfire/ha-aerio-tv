@@ -23,10 +23,12 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.trigger import PluggableAction
 
 from . import AerioTVConfigEntry
 from .client import AerioTVClient, AerioTVState
 from .const import CONF_DEVICE_ID, DOMAIN
+from .triggers.turn_on import async_get_turn_on_trigger
 
 BASE_FEATURES = MediaPlayerEntityFeature.PLAY | MediaPlayerEntityFeature.PAUSE
 DISPATCHARR_DOMAIN = "dispatcharr"
@@ -67,9 +69,14 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
         self._media_channel: str | None = None
         self._media_title: str | None = None
         self._media_image_url: str | None = None
+        self._turn_on_action = PluggableAction(self.async_write_ha_state)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        if (registry_entry := self.registry_entry) and registry_entry.device_id:
+            self.async_on_remove(
+                self._turn_on_action.async_register(self.hass, async_get_turn_on_trigger(registry_entry.device_id))
+            )
         self._remove_callback = self._client.add_callback(self._state_updated)
         self._remove_config_entry_callback = async_dispatcher_connect(
             self.hass, SIGNAL_CONFIG_ENTRY_CHANGED, self._config_entry_updated
@@ -244,15 +251,21 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
 
     @property
     def available(self) -> bool:
-        return self._client.state.connected
+        return True
 
     @property
     def state(self) -> MediaPlayerState:
+        if not self._client.state.connected:
+            return MediaPlayerState.OFF
         return MediaPlayerState.PLAYING if self._client.state.is_playing else MediaPlayerState.PAUSED
 
     @property
     def supported_features(self) -> MediaPlayerEntityFeature:
+        if not self._client.state.connected:
+            return MediaPlayerEntityFeature.TURN_ON if self._turn_on_action else MediaPlayerEntityFeature(0)
         features = BASE_FEATURES
+        if self._turn_on_action:
+            features |= MediaPlayerEntityFeature.TURN_ON
         if self._client.state.can_seek:
             features |= MediaPlayerEntityFeature.SEEK
         if self._dispatcharr_loaded:
@@ -327,6 +340,12 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
 
     async def async_media_play(self) -> None:
         await self._client.play()
+
+    async def async_turn_on(self) -> None:
+        """Run the user-defined action for starting AerioTV."""
+        if not self._turn_on_action:
+            raise HomeAssistantError("No AerioTV turn-on automation is configured")
+        await self._turn_on_action.async_run(self.hass, self._context)
 
     async def async_media_pause(self) -> None:
         await self._client.pause()
