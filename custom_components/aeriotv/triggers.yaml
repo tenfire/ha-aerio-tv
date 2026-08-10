@@ -1,0 +1,4 @@
+turn_on:
+  target:
+    device:
+      integration: aeriotv
