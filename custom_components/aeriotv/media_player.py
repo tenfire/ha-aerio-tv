@@ -34,6 +34,7 @@ BASE_FEATURES = MediaPlayerEntityFeature.PLAY | MediaPlayerEntityFeature.PAUSE
 DISPATCHARR_DOMAIN = "dispatcharr"
 DISPATCHARR_MEDIA_ROOT = media_source.generate_media_source_id(DISPATCHARR_DOMAIN, "")
 METADATA_REFRESH_INTERVAL = 60.0
+APP_START_TIMEOUT = 60.0
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -70,6 +71,12 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
         self._media_title: str | None = None
         self._media_image_url: str | None = None
         self._turn_on_action = PluggableAction(self.async_write_ha_state)
+        self._connected = asyncio.Event()
+        self._play_media_lock = asyncio.Lock()
+        self._play_media_tasks: set[asyncio.Task[Any]] = set()
+        self._stopping = False
+        if self._client.state.connected:
+            self._connected.set()
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -84,6 +91,14 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
         self._schedule_metadata_refresh(force=True)
 
     async def async_will_remove_from_hass(self) -> None:
+        self._stopping = True
+        self._connected.set()
+        current_task = asyncio.current_task()
+        pending_play_tasks = [task for task in self._play_media_tasks if task is not current_task]
+        for task in pending_play_tasks:
+            task.cancel()
+        if pending_play_tasks:
+            await asyncio.gather(*pending_play_tasks, return_exceptions=True)
         if self._remove_callback:
             self._remove_callback()
         if self._remove_config_entry_callback:
@@ -111,6 +126,10 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
         self.async_write_ha_state()
 
     def _state_updated(self, state: AerioTVState) -> None:
+        if state.connected:
+            self._connected.set()
+        else:
+            self._connected.clear()
         if not state.is_playing and not state.can_seek:
             self._clear_media_metadata()
             self.async_write_ha_state()
@@ -262,7 +281,10 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
     @property
     def supported_features(self) -> MediaPlayerEntityFeature:
         if not self._client.state.connected:
-            return MediaPlayerEntityFeature.TURN_ON if self._turn_on_action else MediaPlayerEntityFeature(0)
+            features = MediaPlayerEntityFeature.TURN_ON if self._turn_on_action else MediaPlayerEntityFeature(0)
+            if self._turn_on_action and self._dispatcharr_loaded:
+                features |= MediaPlayerEntityFeature.PLAY_MEDIA | MediaPlayerEntityFeature.BROWSE_MEDIA
+            return features
         features = BASE_FEATURES
         if self._turn_on_action:
             features |= MediaPlayerEntityFeature.TURN_ON
@@ -410,4 +432,29 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
                 raise ValueError
         except (AttributeError, TypeError, ValueError) as err:
             raise HomeAssistantError("Unsupported Dispatcharr media identifier") from err
-        await self._client.set_channel(f"disp:{channel_id}")
+        task = asyncio.current_task()
+        if task is None:
+            raise HomeAssistantError("AerioTV media selection has no task context")
+        self._play_media_tasks.add(task)
+        try:
+            async with self._play_media_lock:
+                if self._stopping:
+                    raise HomeAssistantError("AerioTV entity is stopping")
+                if not self._client.state.connected:
+                    if not self._turn_on_action:
+                        raise HomeAssistantError("No AerioTV turn-on automation is configured")
+                    try:
+                        async with asyncio.timeout(APP_START_TIMEOUT):
+                            await self._turn_on_action.async_run(self.hass, self._context)
+                            while not self._client.state.connected:
+                                self._connected.clear()
+                                if self._stopping:
+                                    raise HomeAssistantError("AerioTV entity stopped while starting")
+                                await self._connected.wait()
+                            if self._stopping:
+                                raise HomeAssistantError("AerioTV entity stopped while starting")
+                    except TimeoutError as err:
+                        raise HomeAssistantError("AerioTV did not reconnect after the turn-on action") from err
+                await self._client.set_channel(f"disp:{channel_id}")
+        finally:
+            self._play_media_tasks.discard(task)
