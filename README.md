@@ -16,6 +16,8 @@ AerioTV remains the playback authority. Home Assistant connects directly to each
 - Play, pause, play/pause, and seek controls
 - Optional Dispatcharr channel browser with groups, logos, and current-programme labels
 - Channel selection from Home Assistant's media picker using stable Dispatcharr channel UUIDs
+- Closed foreground app reported as `off`, with a configurable device trigger for turn-on requests
+- Optional off-state channel selection that runs the configured turn-on automation, waits for AerioTV to reconnect, and then starts the selected channel
 - Privacy-preserving diagnostics with credentials, endpoint, device identity, and channel identity redacted
 
 ## Optional Dispatcharr channel browsing
@@ -67,7 +69,9 @@ If discovery is unavailable, enter the TV's host and the ephemeral port advertis
 
 ## Media-player behavior
 
-The entity reports unavailable whenever the foreground-only companion server cannot be reached. If Home Assistant starts while AerioTV is closed, the config entry and unavailable entity still load immediately while reconnection continues in the background. While connected, it receives state pushes from AerioTV instead of polling rapidly.
+The entity reports `off` while the foreground-only companion server cannot be reached. If Home Assistant starts while AerioTV is closed, the config entry and entity still load immediately while reconnection continues in the background. While connected, it receives state pushes from AerioTV instead of polling rapidly.
+
+The AerioTV device exposes **Device is requested to turn on** as an automation trigger. Attach an automation to that trigger to start the Android TV device and launch AerioTV in whatever way fits the room. Once attached, the media-player entity exposes **Turn on** while the app is closed.
 
 Supported controls currently include:
 
@@ -76,8 +80,11 @@ Supported controls currently include:
 - play/pause
 - seek when AerioTV reports a seekable playback window
 - browse and select Dispatcharr channels when that integration is loaded
+- turn on through the attached device-trigger automation
 
 Open the media browser for the AerioTV entity and select **Dispatcharr**. Dispatcharr owns the displayed folders, channel names, logos, and current-programme labels. AerioTV receives only the selected stable channel UUID and switches through its native `disp:<uuid>` command.
+
+When a turn-on automation is attached, the Dispatcharr media picker also remains available while AerioTV is off. Selecting a channel runs the same turn-on automation, waits up to 60 seconds for the AerioTV companion client to reconnect, and only then sends the selected channel. If startup times out, no channel command is sent.
 
 ## Troubleshooting
 
@@ -87,9 +94,9 @@ Open the media browser for the AerioTV entity and select **Dispatcharr**. Dispat
 - Confirm Home Assistant and the TV are on networks that permit multicast DNS.
 - Check that client isolation or firewall rules do not block LAN traffic between them.
 
-### The entity is unavailable
+### The entity is off
 
-AerioTV stops its companion server when the Android TV app leaves the foreground. Reopen AerioTV. Discovery will update the saved host and ephemeral port for the same stable device ID.
+AerioTV stops its companion server when the Android TV app leaves the foreground, so the entity normally reports `off`. Reopen AerioTV manually, use **Turn on** after attaching a turn-on automation, or select a Dispatcharr channel from the off-state media picker. Discovery will update the saved host and ephemeral port for the same stable device ID.
 
 ### Pairing fails
 
