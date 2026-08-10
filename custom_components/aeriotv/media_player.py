@@ -25,7 +25,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.trigger import PluggableAction
 
-from . import AerioTVConfigEntry
+from . import APP_READY_DELAY, PENDING_CHANNELS, AerioTVConfigEntry
 from .client import AerioTVClient, AerioTVState
 from .const import CONF_DEVICE_ID, DOMAIN
 from .triggers.turn_on import async_get_turn_on_trigger
@@ -35,7 +35,6 @@ DISPATCHARR_DOMAIN = "dispatcharr"
 DISPATCHARR_MEDIA_ROOT = media_source.generate_media_source_id(DISPATCHARR_DOMAIN, "")
 METADATA_REFRESH_INTERVAL = 60.0
 APP_START_TIMEOUT = 60.0
-APP_READY_DELAY = 5.0
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -56,6 +55,7 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
 
     def __init__(self, entry: AerioTVConfigEntry) -> None:
         self._client: AerioTVClient = entry.runtime_data
+        self._entry_id = entry.entry_id
         self._attr_unique_id = entry.data[CONF_DEVICE_ID]
         self._attr_device_info = {
             "identifiers": {(DOMAIN, self._attr_unique_id)},
@@ -437,11 +437,13 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
         if task is None:
             raise HomeAssistantError("AerioTV media selection has no task context")
         self._play_media_tasks.add(task)
+        pending_channels = self.hass.data.setdefault(DOMAIN, {}).setdefault(PENDING_CHANNELS, {})
         try:
             async with self._play_media_lock:
                 if self._stopping:
                     raise HomeAssistantError("AerioTV entity is stopping")
                 if not self._client.state.connected:
+                    pending_channels[self._entry_id] = f"disp:{channel_id}"
                     if not self._turn_on_action:
                         raise HomeAssistantError("No AerioTV turn-on automation is configured")
                     try:
@@ -458,5 +460,7 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
                     except TimeoutError as err:
                         raise HomeAssistantError("AerioTV did not reconnect after the turn-on action") from err
                 await self._client.set_channel(f"disp:{channel_id}")
+                if pending_channels.get(self._entry_id) == f"disp:{channel_id}":
+                    pending_channels.pop(self._entry_id, None)
         finally:
             self._play_media_tasks.discard(task)
