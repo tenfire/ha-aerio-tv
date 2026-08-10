@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from time import monotonic
 from typing import Any
 from urllib.parse import unquote, urlsplit
 from uuid import UUID
@@ -30,6 +31,7 @@ from .const import CONF_DEVICE_ID, DOMAIN
 BASE_FEATURES = MediaPlayerEntityFeature.PLAY | MediaPlayerEntityFeature.PAUSE
 DISPATCHARR_DOMAIN = "dispatcharr"
 DISPATCHARR_MEDIA_ROOT = media_source.generate_media_source_id(DISPATCHARR_DOMAIN, "")
+METADATA_REFRESH_INTERVAL = 60.0
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -61,6 +63,7 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
         self._remove_config_entry_callback = None
         self._metadata_task: asyncio.Task[None] | None = None
         self._metadata_channel_id: str | None = self._client.state.channel_id
+        self._metadata_refreshed_at = 0.0
         self._media_channel: str | None = None
         self._media_title: str | None = None
         self._media_image_url: str | None = None
@@ -101,22 +104,57 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
         self.async_write_ha_state()
 
     def _state_updated(self, state: AerioTVState) -> None:
-        self._schedule_metadata_refresh()
+        if not state.is_playing and not state.can_seek:
+            self._clear_media_metadata()
+            self.async_write_ha_state()
+            return
+        channel_id = state.channel_id
+        if (
+            channel_id
+            and channel_id == self._metadata_channel_id
+            and channel_id.startswith("disp:")
+            and monotonic() - self._metadata_refreshed_at >= METADATA_REFRESH_INTERVAL
+        ):
+            self._schedule_metadata_refresh(force=True)
+        else:
+            self._schedule_metadata_refresh()
         self.async_write_ha_state()
 
-    def _schedule_metadata_refresh(self, *, force: bool = False) -> None:
-        """Refresh metadata when the native channel or provider changes."""
-        channel_id = self._client.state.channel_id
-        if not force and channel_id == self._metadata_channel_id:
-            return
-        self._metadata_channel_id = channel_id
+    def _clear_media_metadata(self) -> None:
+        """Clear now-playing metadata after an authoritative idle snapshot."""
+        self._metadata_channel_id = None
+        self._metadata_refreshed_at = 0.0
         self._media_channel = None
         self._media_title = None
         self._media_image_url = None
         if self._metadata_task:
             self._metadata_task.cancel()
             self._metadata_task = None
+
+    def _metadata_playback_active(self) -> bool:
+        """Return whether now-playing metadata is valid for the current state."""
+        state = self._client.state
+        return state.connected and (state.is_playing or state.can_seek)
+
+    def _schedule_metadata_refresh(self, *, force: bool = False) -> None:
+        """Refresh metadata when the native channel or provider changes."""
+        if not self._metadata_playback_active():
+            self._clear_media_metadata()
+            return
+        channel_id = self._client.state.channel_id
+        if not force and channel_id == self._metadata_channel_id:
+            return
+        channel_changed = channel_id != self._metadata_channel_id
+        self._metadata_channel_id = channel_id
+        if channel_changed:
+            self._media_channel = None
+            self._media_title = None
+            self._media_image_url = None
+        if self._metadata_task:
+            self._metadata_task.cancel()
+            self._metadata_task = None
         if self.hass is not None and channel_id and channel_id.startswith("disp:"):
+            self._metadata_refreshed_at = monotonic()
             self._metadata_task = self.hass.async_create_task(
                 self._async_refresh_media_metadata(),
                 f"Refresh AerioTV metadata for {self.entity_id or self._attr_unique_id}",
@@ -125,18 +163,18 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
     async def _async_refresh_media_metadata(self) -> None:
         """Look up current channel metadata through Dispatcharr's public media source."""
         native_id = self._client.state.channel_id
-        if native_id is None or not native_id.startswith("disp:"):
+        if not self._metadata_playback_active() or native_id is None or not native_id.startswith("disp:"):
             return
         channel_id = native_id.removeprefix("disp:")
         matches: list[tuple[str, str | None, str | None]] = []
         for entry_id in self._loaded_dispatcharr_entry_ids:
             channel = await self._async_browse_metadata_leaf(entry_id, "channel", channel_id, can_play=True)
-            if self._client.state.channel_id != native_id:
+            if self._client.state.channel_id != native_id or not self._metadata_playback_active():
                 return
             if channel is None:
                 continue
             programme = await self._async_browse_metadata_leaf(entry_id, "programme", channel_id, can_play=False)
-            if self._client.state.channel_id != native_id:
+            if self._client.state.channel_id != native_id or not self._metadata_playback_active():
                 return
             matches.append(
                 (
@@ -145,18 +183,22 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
                     self._validated_artwork_path(entry_id, channel.thumbnail),
                 )
             )
-        if self._client.state.channel_id != native_id:
+        if self._client.state.channel_id != native_id or not self._metadata_playback_active():
             return
         if len(matches) == 1:
             channel, programme, image = matches[0]
-            self._media_channel = channel
-            self._media_title = programme or channel
-            self._media_image_url = image
-            self.async_write_ha_state()
+            metadata = (channel, programme or channel, image)
         elif len(matches) > 1:
             _LOGGER.debug("Dispatcharr channel metadata is ambiguous across entries")
+            metadata = (None, None, None)
         else:
             _LOGGER.debug("No Dispatcharr metadata found for the current AerioTV channel")
+            metadata = (None, None, None)
+        if self._client.state.channel_id != native_id or not self._metadata_playback_active():
+            return
+        if metadata != (self._media_channel, self._media_title, self._media_image_url):
+            self._media_channel, self._media_title, self._media_image_url = metadata
+            self.async_write_ha_state()
 
     async def _async_browse_metadata_leaf(self, entry_id: str, kind: str, channel_id: str, *, can_play: bool):
         """Fetch and validate one public Dispatcharr metadata leaf."""

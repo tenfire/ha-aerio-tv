@@ -237,7 +237,12 @@ async def test_current_dispatcharr_channel_enriches_title_and_image(
     """The current native UUID is enriched through Dispatcharr's public leaf."""
     channel_id = "ceaf43af-32ad-432f-9a41-465ced16e655"
     client = AsyncMock()
-    client.state = AerioTVState(connected=True, channel_id=f"disp:{channel_id}")
+    client.state = AerioTVState(
+        connected=True,
+        channel_id=f"disp:{channel_id}",
+        is_playing=True,
+        can_seek=True,
+    )
     entity = AerioTVMediaPlayer(make_entry(client))
     entity.hass = hass
     entity.async_write_ha_state = Mock()
@@ -296,6 +301,165 @@ async def test_channel_change_clears_stale_metadata(hass: HomeAssistant) -> None
     assert entity.media_image_url is None
 
 
+async def test_same_channel_refreshes_metadata_after_one_minute(
+    hass: HomeAssistant,
+) -> None:
+    """Push updates refresh a programme after the bounded freshness interval."""
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True, channel_id="disp:same", is_playing=True, can_seek=True)
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity.async_write_ha_state = Mock()
+    entity._metadata_channel_id = "disp:same"
+    entity._metadata_refreshed_at = 100.0
+
+    with (
+        patch("custom_components.aeriotv.media_player.monotonic", return_value=159.9),
+        patch.object(entity, "_schedule_metadata_refresh") as refresh,
+    ):
+        entity._state_updated(client.state)
+        refresh.assert_called_once_with()
+
+    with (
+        patch("custom_components.aeriotv.media_player.monotonic", return_value=160.0),
+        patch.object(entity, "_schedule_metadata_refresh") as refresh,
+    ):
+        entity._state_updated(client.state)
+        refresh.assert_called_once_with(force=True)
+
+
+async def test_paused_channel_does_not_clear_metadata(hass: HomeAssistant) -> None:
+    """A genuine pause retains its active channel and programme metadata."""
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True, channel_id="disp:same", is_playing=False, can_seek=True)
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity.async_write_ha_state = Mock()
+    entity._metadata_channel_id = "disp:same"
+    entity._metadata_refreshed_at = 100.0
+    entity._media_channel = "TV 8"
+    entity._media_title = "Current programme"
+
+    with patch("custom_components.aeriotv.media_player.monotonic", return_value=100.0):
+        entity._state_updated(client.state)
+
+    assert entity.media_channel == "TV 8"
+    assert entity.media_title == "Current programme"
+
+
+async def test_idle_snapshot_clears_metadata_and_cancels_refresh(
+    hass: HomeAssistant,
+) -> None:
+    """The same signal that removes the seekbar clears stale now-playing data."""
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True, channel_id="disp:same", is_playing=False, can_seek=False)
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity.async_write_ha_state = Mock()
+    entity._metadata_channel_id = "disp:same"
+    entity._metadata_refreshed_at = 100.0
+    entity._media_channel = "TV 8"
+    entity._media_title = "Previous programme"
+    entity._media_image_url = "/api/dispatcharr/entry-one/artwork/17"
+    refresh_task = Mock()
+    entity._metadata_task = refresh_task
+
+    entity._state_updated(client.state)
+
+    refresh_task.cancel.assert_called_once_with()
+    assert entity._metadata_task is None
+    assert entity._metadata_channel_id is None
+    assert entity.media_channel is None
+    assert entity.media_title is None
+    assert entity.media_image_url is None
+    entity.async_write_ha_state.assert_called_once_with()
+
+
+async def test_resume_same_channel_refreshes_after_idle(hass: HomeAssistant) -> None:
+    """Resetting idle identity forces metadata lookup when playback resumes."""
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True, channel_id="disp:same", is_playing=False, can_seek=False)
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity.async_write_ha_state = Mock()
+    entity._metadata_channel_id = "disp:same"
+
+    entity._state_updated(client.state)
+    client.state.is_playing = True
+    client.state.can_seek = True
+
+    with patch.object(entity, "_schedule_metadata_refresh") as refresh:
+        entity._state_updated(client.state)
+
+    refresh.assert_called_once_with()
+
+
+async def test_provider_event_cannot_repopulate_idle_metadata(
+    hass: HomeAssistant,
+) -> None:
+    """A retained channel ID cannot restart enrichment after playback stops."""
+    client = AsyncMock()
+    client.state = AerioTVState(connected=True, channel_id="disp:same", is_playing=False, can_seek=False)
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity.async_write_ha_state = Mock()
+
+    with patch.object(hass, "async_create_task") as create_task:
+        entity._async_config_entry_updated()
+
+    create_task.assert_not_called()
+    assert entity.media_title is None
+
+
+async def test_inflight_refresh_cannot_publish_after_idle(hass: HomeAssistant) -> None:
+    """A lookup crossing an idle transition cannot restore stopped metadata."""
+    channel_id = "ceaf43af-32ad-432f-9a41-465ced16e655"
+    client = AsyncMock()
+    client.state = AerioTVState(
+        connected=True,
+        channel_id=f"disp:{channel_id}",
+        is_playing=True,
+        can_seek=True,
+    )
+    entity = AerioTVMediaPlayer(make_entry(client))
+    entity.hass = hass
+    entity.async_write_ha_state = Mock()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def browse(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+        return SimpleNamespace(
+            domain="dispatcharr",
+            identifier=f"entry/entry-one/channel/{channel_id}",
+            can_play=True,
+            can_expand=False,
+            title="TV 8",
+            thumbnail=None,
+        )
+
+    entry = AsyncMock()
+    entry.state = ConfigEntryState.LOADED
+    entry.entry_id = "entry-one"
+    with (
+        patch.object(hass.config_entries, "async_entries", return_value=[entry]),
+        patch(
+            "custom_components.aeriotv.media_player.media_source.async_browse_media",
+            side_effect=browse,
+        ),
+    ):
+        task = asyncio.create_task(entity._async_refresh_media_metadata())
+        await started.wait()
+        client.state.is_playing = False
+        client.state.can_seek = False
+        release.set()
+        await task
+
+    assert entity.media_title is None
+    entity.async_write_ha_state.assert_not_called()
+
+
 async def test_stale_metadata_lookup_cannot_overwrite_new_channel(
     hass: HomeAssistant,
 ) -> None:
@@ -303,7 +467,12 @@ async def test_stale_metadata_lookup_cannot_overwrite_new_channel(
     old_id = "ceaf43af-32ad-432f-9a41-465ced16e655"
     new_id = "7e343078-9dc6-43d8-bbad-ecb75d2d9c71"
     client = AsyncMock()
-    client.state = AerioTVState(connected=True, channel_id=f"disp:{old_id}")
+    client.state = AerioTVState(
+        connected=True,
+        channel_id=f"disp:{old_id}",
+        is_playing=True,
+        can_seek=True,
+    )
     entity = AerioTVMediaPlayer(make_entry(client))
     entity.hass = hass
     entity.async_write_ha_state = Mock()
