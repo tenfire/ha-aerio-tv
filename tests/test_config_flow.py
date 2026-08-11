@@ -75,6 +75,17 @@ async def test_zeroconf_uses_stable_id_and_pairs(hass: HomeAssistant, enable_cus
     }
 
 
+async def test_user_setup_requires_discovery(hass: HomeAssistant, enable_custom_integrations) -> None:
+    """User-initiated setup does not expose an ephemeral manual endpoint form."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_USER},
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "discovery_required"
+
+
 async def test_pair_form_rejects_non_digit_code_locally(hass: HomeAssistant, enable_custom_integrations) -> None:
     """A malformed six-character code remains on the form without a socket send."""
     submit_code = AsyncMock()

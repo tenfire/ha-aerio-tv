@@ -9,7 +9,6 @@ AerioTV remains the playback authority. Home Assistant connects directly to each
 - One config entry and media-player entity per AerioTV device
 - Multiple TVs supported
 - Automatic discovery using `_aeriotv._tcp.local.`
-- Manual host and advertised-port fallback
 - On-screen six-digit pairing
 - Durable per-TV authentication token across Home Assistant restarts
 - Local push state for availability, play/pause, current channel ID, live status, and live rewind position
@@ -38,7 +37,7 @@ This keeps both integrations independently installable and avoids two competing 
 - AerioTV must be installed on an Android TV device.
 - AerioTV currently advertises its companion server only while the TV app is in the foreground.
 - The companion server uses an ephemeral port, so automatic discovery is strongly recommended.
-- Manual setup requires both the TV address and the currently advertised port.
+- Setup requires automatic discovery because the companion server's port changes whenever AerioTV restarts.
 - Communication uses AerioTV's existing unencrypted `ws://` protocol. Authentication does not encrypt traffic: a device able to capture LAN traffic can replay the bearer token and control the TV. Isolate untrusted clients, keep the TV and Home Assistant on a trusted network, and never expose the companion port to the internet.
 - Dispatcharr browsing is optional. Without it, pairing and all ordinary AerioTV controls continue to work.
 - A selected Dispatcharr channel must also exist in the catalogue loaded by the AerioTV Android app. Both sides use the same stable Dispatcharr UUID; AerioTV does not receive or play Dispatcharr's stream URL from Home Assistant.
@@ -62,10 +61,6 @@ Until this repository is included in the default HACS catalogue:
 4. Enter that code in Home Assistant.
 
 Home Assistant stores only the random token returned after successful pairing. Pairing codes and tokens are not exposed as entity attributes or in diagnostics.
-
-### Manual setup
-
-If discovery is unavailable, enter the TV's host and the ephemeral port advertised by `_aeriotv._tcp.local.`. The port can change when AerioTV restarts, so manual setup is less durable than discovery.
 
 ## Media-player behavior
 

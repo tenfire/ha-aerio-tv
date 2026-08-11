@@ -6,7 +6,7 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.const import CONF_CODE, CONF_HOST, CONF_NAME
+from homeassistant.const import CONF_CODE, CONF_HOST
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
@@ -29,26 +29,8 @@ class AerioTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._reauth_entry: config_entries.ConfigEntry | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        errors: dict[str, str] = {}
-        if user_input:
-            self._host = user_input[CONF_HOST].strip()
-            self._port = user_input[CONF_PORT]
-            self._name = user_input.get(CONF_NAME, DEFAULT_NAME).strip() or DEFAULT_NAME
-            result = await self._start_pairing()
-            if result is not None:
-                return result
-            errors["base"] = "cannot_connect"
-        return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_HOST): str,
-                    vol.Required(CONF_PORT): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
-                    vol.Optional(CONF_NAME, default=DEFAULT_NAME): str,
-                }
-            ),
-            errors=errors,
-        )
+        """Require discovery because the advertised endpoint is ephemeral."""
+        return self.async_abort(reason="discovery_required")
 
     async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo) -> FlowResult:
         properties = discovery_info.properties
