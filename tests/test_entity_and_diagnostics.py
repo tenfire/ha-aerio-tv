@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from homeassistant import config_entries
-from homeassistant.components.media_player import MediaPlayerEntityFeature
+from homeassistant.components.media_player import BrowseMedia, MediaPlayerEntityFeature
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
@@ -88,7 +88,7 @@ async def test_live_rewind_maps_to_relative_timeline() -> None:
     assert entity.supported_features & MediaPlayerEntityFeature.SEEK
 
     await entity.async_media_seek(90)
-    client.seek_by.assert_awaited_once_with(30_000)
+    client.seek_to_wall.assert_awaited_once_with(1_700_000_090_000)
 
 
 def test_seek_feature_hidden_when_not_seekable() -> None:
@@ -122,12 +122,19 @@ def test_dispatcharr_features_are_soft_dependency(hass: HomeAssistant) -> None:
 
 
 async def test_browse_delegates_to_dispatcharr_media_source(hass: HomeAssistant) -> None:
-    """Dispatcharr owns the catalogue exposed through the AerioTV picker."""
+    """The picker preserves Dispatcharr as a branded top-level source."""
     client = AsyncMock()
     client.state = AerioTVState(connected=True)
     entity = AerioTVMediaPlayer(make_entry(client))
     entity.hass = hass
-    expected = AsyncMock()
+    expected = BrowseMedia(
+        title="Dispatcharr",
+        media_class="directory",
+        media_content_id="media-source://dispatcharr",
+        media_content_type="video",
+        can_play=False,
+        can_expand=True,
+    )
     entry = AsyncMock()
     entry.state = ConfigEntryState.LOADED
     entry.entry_id = "entry-one"
@@ -139,9 +146,12 @@ async def test_browse_delegates_to_dispatcharr_media_source(hass: HomeAssistant)
             AsyncMock(return_value=expected),
         ) as browse,
     ):
-        assert await entity.async_browse_media() is expected
+        root = await entity.async_browse_media()
 
     browse.assert_awaited_once_with(hass, "media-source://dispatcharr")
+    assert root.media_content_id == ""
+    assert root.title == "Media"
+    assert root.children == [expected]
 
 
 async def test_browse_rejects_other_or_encoded_media_sources(hass: HomeAssistant) -> None:

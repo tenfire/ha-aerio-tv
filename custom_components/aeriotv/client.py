@@ -182,6 +182,10 @@ class AerioTVClient:
     async def seek_by(self, delta_ms: int) -> None:
         await self.command("seekBy", deltaMs=delta_ms)
 
+    async def seek_to_wall(self, target_wall_ms: int) -> None:
+        """Seek to an absolute position on AerioTV's wall-clock timeline."""
+        await self.command("seekWall", targetWallMs=target_wall_ms)
+
     async def set_channel(self, channel_id: str) -> None:
         await self.command("setChannel", channelId=channel_id)
 
