@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timedelta
 from time import monotonic
 from typing import Any
@@ -379,8 +380,10 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
 
     async def async_media_seek(self, position: float) -> None:
         state = self._client.state
-        if not state.can_seek:
+        if not state.can_seek or state.window_end_ms <= state.window_start_ms:
             raise HomeAssistantError("The current AerioTV media is not seekable")
+        if not math.isfinite(position):
+            raise HomeAssistantError("The requested AerioTV seek position must be finite")
         duration = max(0, state.window_end_ms - state.window_start_ms) / 1000
         target_wall_ms = state.window_start_ms + int(min(max(position, 0), duration) * 1000)
         await self._client.seek_to_wall(target_wall_ms)

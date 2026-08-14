@@ -68,7 +68,7 @@ async def test_diagnostics_redact_identifiers(hass: HomeAssistant) -> None:
 
 
 async def test_live_rewind_maps_to_relative_timeline() -> None:
-    """Wall-clock rewind values map to HA-relative position and seek delta."""
+    """Wall-clock rewind values map to an absolute AerioTV seek target."""
     client = AsyncMock()
     updated_at = datetime(2026, 8, 9, 19, 51, 54, tzinfo=UTC)
     client.state = AerioTVState(
@@ -89,6 +89,59 @@ async def test_live_rewind_maps_to_relative_timeline() -> None:
 
     await entity.async_media_seek(90)
     client.seek_to_wall.assert_awaited_once_with(1_700_000_090_000)
+
+
+@pytest.mark.parametrize(
+    ("position", "target"),
+    [(-10, 1_700_000_000_000), (130, 1_700_000_120_000)],
+)
+async def test_live_rewind_seek_clamps_to_window(position: float, target: int) -> None:
+    """Seek requests cannot escape AerioTV's reported rewind window."""
+    client = AsyncMock()
+    client.state = AerioTVState(
+        can_seek=True,
+        position_ms=1,
+        window_start_ms=1_700_000_000_000,
+        window_end_ms=1_700_000_120_000,
+    )
+    entity = AerioTVMediaPlayer(make_entry(client))
+
+    await entity.async_media_seek(position)
+
+    client.seek_to_wall.assert_awaited_once_with(target)
+
+
+@pytest.mark.parametrize("position", [float("nan"), float("inf"), float("-inf")])
+async def test_live_rewind_seek_rejects_invalid_position(position: float) -> None:
+    """Non-finite HA seek values fail as a clean service error."""
+    client = AsyncMock()
+    client.state = AerioTVState(
+        can_seek=True,
+        window_start_ms=1_700_000_000_000,
+        window_end_ms=1_700_000_120_000,
+    )
+    entity = AerioTVMediaPlayer(make_entry(client))
+
+    with pytest.raises(HomeAssistantError, match="finite"):
+        await entity.async_media_seek(position)
+
+    client.seek_to_wall.assert_not_awaited()
+
+
+async def test_live_rewind_seek_rejects_invalid_window() -> None:
+    """A malformed or empty rewind window is not seekable."""
+    client = AsyncMock()
+    client.state = AerioTVState(
+        can_seek=True,
+        window_start_ms=1_700_000_120_000,
+        window_end_ms=1_700_000_120_000,
+    )
+    entity = AerioTVMediaPlayer(make_entry(client))
+
+    with pytest.raises(HomeAssistantError, match="not seekable"):
+        await entity.async_media_seek(0)
+
+    client.seek_to_wall.assert_not_awaited()
 
 
 def test_seek_feature_hidden_when_not_seekable() -> None:
