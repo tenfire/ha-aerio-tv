@@ -81,6 +81,10 @@ async def test_pair_and_commands(server, aiohttp_client, socket_enabled):
     async with asyncio.timeout(1):
         await channel_received.wait()
     assert received[-1] == {"cmd": "setChannel", "channelId": "disp:def"}
+
+    await client.seek_to_wall(1_700_000_090_000)
+    await asyncio.sleep(0.05)
+    assert received[-1] == {"cmd": "seekWall", "targetWallMs": 1_700_000_090_000}
     await client.disconnect()
 
 

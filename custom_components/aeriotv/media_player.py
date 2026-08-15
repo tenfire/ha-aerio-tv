@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timedelta
 from time import monotonic
 from typing import Any
@@ -13,6 +14,7 @@ from uuid import UUID
 from homeassistant.components import media_source
 from homeassistant.components.http.auth import async_sign_path
 from homeassistant.components.media_player import (
+    BrowseMedia,
     MediaPlayerEntity,
     MediaPlayerEntityFeature,
     MediaPlayerState,
@@ -378,11 +380,13 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
 
     async def async_media_seek(self, position: float) -> None:
         state = self._client.state
-        if not state.can_seek:
+        if not state.can_seek or state.window_end_ms <= state.window_start_ms:
             raise HomeAssistantError("The current AerioTV media is not seekable")
+        if not math.isfinite(position):
+            raise HomeAssistantError("The requested AerioTV seek position must be finite")
         duration = max(0, state.window_end_ms - state.window_start_ms) / 1000
         target_wall_ms = state.window_start_ms + int(min(max(position, 0), duration) * 1000)
-        await self._client.seek_by(target_wall_ms - state.position_ms)
+        await self._client.seek_to_wall(target_wall_ms)
 
     async def async_browse_media(
         self,
@@ -403,7 +407,18 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
             or unquote(parsed.path) != parsed.path
         ):
             raise HomeAssistantError("Only Dispatcharr media can be browsed")
-        return await media_source.async_browse_media(self.hass, media_id)
+        dispatcharr = await media_source.async_browse_media(self.hass, media_id)
+        if media_content_id is not None:
+            return dispatcharr
+        return BrowseMedia(
+            title="Media",
+            media_class="directory",
+            media_content_id="",
+            media_content_type=MediaType.VIDEO,
+            can_play=False,
+            can_expand=True,
+            children=[dispatcharr],
+        )
 
     async def async_play_media(
         self,
