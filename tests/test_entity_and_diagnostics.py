@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from homeassistant import config_entries
-from homeassistant.components.media_player import BrowseMedia, MediaPlayerEntityFeature
+from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
@@ -175,19 +175,12 @@ def test_dispatcharr_features_are_soft_dependency(hass: HomeAssistant) -> None:
 
 
 async def test_browse_delegates_to_dispatcharr_media_source(hass: HomeAssistant) -> None:
-    """The picker preserves Dispatcharr as a branded top-level source."""
+    """Dispatcharr owns the catalogue exposed through the AerioTV picker."""
     client = AsyncMock()
     client.state = AerioTVState(connected=True)
     entity = AerioTVMediaPlayer(make_entry(client))
     entity.hass = hass
-    expected = BrowseMedia(
-        title="Dispatcharr",
-        media_class="directory",
-        media_content_id="media-source://dispatcharr",
-        media_content_type="video",
-        can_play=False,
-        can_expand=True,
-    )
+    expected = AsyncMock()
     entry = AsyncMock()
     entry.state = ConfigEntryState.LOADED
     entry.entry_id = "entry-one"
@@ -199,12 +192,9 @@ async def test_browse_delegates_to_dispatcharr_media_source(hass: HomeAssistant)
             AsyncMock(return_value=expected),
         ) as browse,
     ):
-        root = await entity.async_browse_media()
+        assert await entity.async_browse_media() is expected
 
     browse.assert_awaited_once_with(hass, "media-source://dispatcharr")
-    assert root.media_content_id == ""
-    assert root.title == "Media"
-    assert root.children == [expected]
 
 
 async def test_browse_rejects_other_or_encoded_media_sources(hass: HomeAssistant) -> None:
