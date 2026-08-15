@@ -45,7 +45,6 @@ class AerioTVState:
 
 StateCallback = Callable[[AerioTVState], None]
 AuthFailureCallback = Callable[[], None]
-RECONNECT_DELAYS = (1, 2, 5, 10, 30)
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -68,8 +67,6 @@ class AerioTVClient:
         self.state = AerioTVState()
         self._ws: ClientWebSocketResponse | None = None
         self._listener: asyncio.Task[None] | None = None
-        self._reconnect_task: asyncio.Task[None] | None = None
-        self._managed = False
         self._stopping = False
         self._callbacks: set[StateCallback] = set()
         self._auth_event = asyncio.Event()
@@ -105,15 +102,17 @@ class AerioTVClient:
             raise error
 
     async def start(self) -> None:
-        """Connect or remain unavailable while supervising reconnection."""
-        self._managed = True
+        """Attempt one runtime connection and otherwise remain off."""
         self._stopping = False
         try:
             await self.connect()
         except AerioTVConnectionError:
             self.state.connected = False
             self._notify()
-            self._schedule_reconnect()
+        except AerioTVAuthError:
+            if self._auth_failure_callback is not None:
+                self._auth_failure_callback()
+            raise
         except Exception:
             await self.disconnect()
             raise
@@ -145,12 +144,6 @@ class AerioTVClient:
 
     async def disconnect(self) -> None:
         self._stopping = True
-        self._managed = False
-        reconnect, self._reconnect_task = self._reconnect_task, None
-        if reconnect and reconnect is not asyncio.current_task():
-            reconnect.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await reconnect
         await self._close_transport()
         self.state.connected = False
         self._notify()
@@ -222,35 +215,6 @@ class AerioTVClient:
             self._notify()
             if self._listener is asyncio.current_task():
                 self._listener = None
-            if self._managed and not self._stopping:
-                self._schedule_reconnect()
-
-    def _schedule_reconnect(self) -> None:
-        if self._reconnect_task is None or self._reconnect_task.done():
-            self._reconnect_task = asyncio.create_task(self._reconnect())
-
-    async def _reconnect(self) -> None:
-        """Reconnect with bounded backoff until stopped or connected."""
-        attempt = 0
-        try:
-            while self._managed and not self._stopping:
-                await asyncio.sleep(RECONNECT_DELAYS[min(attempt, len(RECONNECT_DELAYS) - 1)])
-                try:
-                    await self.connect()
-                except AerioTVAuthError:
-                    self._managed = False
-                    if self._auth_failure_callback is not None:
-                        self._auth_failure_callback()
-                    return
-                except AerioTVConnectionError:
-                    attempt += 1
-                    continue
-                return
-        finally:
-            if self._reconnect_task is asyncio.current_task():
-                self._reconnect_task = None
-            if self._managed and not self._stopping and not self.state.connected:
-                self._schedule_reconnect()
 
     def _handle(self, payload: object) -> None:
         if not isinstance(payload, dict):
