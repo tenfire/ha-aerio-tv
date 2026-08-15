@@ -14,7 +14,6 @@ from uuid import UUID
 from homeassistant.components import media_source
 from homeassistant.components.http.auth import async_sign_path
 from homeassistant.components.media_player import (
-    BrowseMedia,
     MediaPlayerEntity,
     MediaPlayerEntityFeature,
     MediaPlayerState,
@@ -407,18 +406,7 @@ class AerioTVMediaPlayer(MediaPlayerEntity):
             or unquote(parsed.path) != parsed.path
         ):
             raise HomeAssistantError("Only Dispatcharr media can be browsed")
-        dispatcharr = await media_source.async_browse_media(self.hass, media_id)
-        if media_content_id is not None:
-            return dispatcharr
-        return BrowseMedia(
-            title="Media",
-            media_class="directory",
-            media_content_id="",
-            media_content_type=MediaType.VIDEO,
-            can_play=False,
-            can_expand=True,
-            children=[dispatcharr],
-        )
+        return await media_source.async_browse_media(self.hass, media_id)
 
     async def async_play_media(
         self,
